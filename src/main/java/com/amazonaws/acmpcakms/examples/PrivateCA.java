@@ -1,31 +1,41 @@
 package com.amazonaws.acmpcakms.examples;
 
+import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.core.waiters.WaiterResponse;
+import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
+import software.amazon.awssdk.http.crt.AwsCrtAsyncHttpClient;
+import software.amazon.awssdk.services.acmpca.AcmPcaAsyncClient;
+import software.amazon.awssdk.services.acmpca.model.*;
+import software.amazon.awssdk.services.acmpca.waiters.AcmPcaAsyncWaiter;
 
-import com.amazonaws.regions.Regions;
-import com.amazonaws.services.acmpca.AWSACMPCA;
-import com.amazonaws.services.acmpca.AWSACMPCAClientBuilder;
-import com.amazonaws.services.acmpca.model.*;
-import com.amazonaws.waiters.Waiter;
-import com.amazonaws.waiters.WaiterParameters;
-
-import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 public class PrivateCA {
 
-    private final AWSACMPCA client;
+    private final AcmPcaAsyncClient client;
     private final String commonName;
     private final CertificateAuthorityType type;
     private final CertificateAuthority ca;
     private final String certificate;
+    private final KeyAlgorithm keyAlgorithm;
+    private final SigningAlgorithm signingAlgorithm;
 
-    private PrivateCA(final Optional<PrivateCA> issuerOption, final String commonName, final CertificateAuthorityType type) {
+    private PrivateCA(final Optional<PrivateCA> issuerOption, final String commonName, final CertificateAuthorityType type, KeyAlgorithm keyAlgorithm, SigningAlgorithm signingAlgorithm) {
         if (Objects.isNull(commonName) || commonName.isBlank()) {
             throw new IllegalArgumentException("A non-empty common name must be specified");
         }
 
         if (Objects.isNull(type)) {
             throw new IllegalArgumentException("A CA type must be specified");
+        }
+
+        if (Objects.isNull(keyAlgorithm)) {
+            throw new IllegalArgumentException("Key Algorithm may not be null.");
+        }
+
+        if (Objects.isNull(signingAlgorithm)) {
+            throw new IllegalArgumentException("Signing Algorithm may not be null.");
         }
 
         if (type.equals(CertificateAuthorityType.ROOT) && issuerOption.isPresent()) {
@@ -36,11 +46,19 @@ public class PrivateCA {
             throw new IllegalArgumentException("A subordinate CA must have an issuer specified");
         }
 
-        this.client = AWSACMPCAClientBuilder.standard()
-                .withRegion(Regions.US_EAST_1)
+        // Set up a PQ TLS HTTP client that will be used when connecting to AWS
+        SdkAsyncHttpClient awsCrtHttpClient = AwsCrtAsyncHttpClient.builder()
+                .postQuantumTlsEnabled(true)
                 .build();
+
+        this.client = AcmPcaAsyncClient.builder()
+                .httpClient(awsCrtHttpClient)
+                .build();
+
         this.commonName = commonName;
         this.type = type;
+        this.keyAlgorithm = keyAlgorithm;
+        this.signingAlgorithm = signingAlgorithm;
 
         List<CertificateAuthority> discoveredCAs = listCAs();
 
@@ -57,11 +75,11 @@ public class PrivateCA {
                 .findFirst()
                 .orElseGet(this::createCA);
 
-        System.out.println("Got CA with CN="  + commonName + ": arn=" + ca.getArn() + ", status=" + ca.getStatus());
+        System.out.println("Got CA with CN="  + commonName + ": arn=" + ca.arn() + ", status=" + ca.status());
 
-        if (ca.getStatus().equals(CertificateAuthorityStatus.ACTIVE.toString())) {
+        if (ca.status().equals(CertificateAuthorityStatus.ACTIVE.toString())) {
             certificate = getCACertificate();
-           return;
+            return;
         }
 
         if (type == CertificateAuthorityType.ROOT) {
@@ -76,185 +94,237 @@ public class PrivateCA {
     }
 
     private boolean matches(final CertificateAuthority ca) {
-        return type.toString().equals(ca.getType()) &&
-                commonName.equals(ca.getCertificateAuthorityConfiguration().getSubject().getCommonName());
+        System.out.println("CA: " + ca.toString());
+        return type.toString().equals(ca.type().toString())
+                && commonName.equals(ca.certificateAuthorityConfiguration().subject().commonName())
+                && keyAlgorithm.equals(ca.certificateAuthorityConfiguration().keyAlgorithm())
+                && signingAlgorithm.equals(ca.certificateAuthorityConfiguration().signingAlgorithm());
     }
 
     private CertificateAuthority createCA() {
         System.out.println("No matching CA found, creating a new one (" + this + ")");
 
-        CreateCertificateAuthorityRequest createCARequest = new CreateCertificateAuthorityRequest()
-                .withTags(new Tag()
-                        .withKey("Name")
-                        .withValue(commonName))
-                .withIdempotencyToken(UUID.randomUUID().toString())
-                .withCertificateAuthorityType(type)
-                .withCertificateAuthorityConfiguration(new CertificateAuthorityConfiguration()
-                        .withSubject(new ASN1Subject()
-                                .withCommonName(commonName))
-                        .withKeyAlgorithm(KeyAlgorithm.RSA_2048)
-                        .withSigningAlgorithm(SigningAlgorithm.SHA256WITHRSA));
+        try {
+            CreateCertificateAuthorityRequest createCARequest = CreateCertificateAuthorityRequest.builder()
+                    .tags(Tag.builder()
+                            .key("Name")
+                            .value(commonName)
+                            .build())
+                    .idempotencyToken(UUID.randomUUID().toString())
+                    .certificateAuthorityType(type)
+                    .certificateAuthorityConfiguration(CertificateAuthorityConfiguration.builder()
+                            .subject(ASN1Subject.builder()
+                                    .commonName(commonName)
+                                    .build())
+                            .keyAlgorithm(keyAlgorithm)
+                            .signingAlgorithm(signingAlgorithm)
+                            .build())
+                    .build();
 
-       String caArn = client.createCertificateAuthority(createCARequest).getCertificateAuthorityArn();
+            String caArn = client.createCertificateAuthority(createCARequest).get().certificateAuthorityArn();
 
-       DescribeCertificateAuthorityRequest describeCARequest = new DescribeCertificateAuthorityRequest()
-               .withCertificateAuthorityArn(caArn);
+            DescribeCertificateAuthorityRequest describeCARequest = DescribeCertificateAuthorityRequest.builder()
+                    .certificateAuthorityArn(caArn)
+                    .build();
 
-       return client.describeCertificateAuthority(describeCARequest).getCertificateAuthority();
+            return client.describeCertificateAuthority(describeCARequest).get().certificateAuthority();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private String getCACertificate() {
-        GetCertificateAuthorityCertificateRequest getCACertificateRequest = new GetCertificateAuthorityCertificateRequest()
-                .withCertificateAuthorityArn(ca.getArn());
+        try {
+            GetCertificateAuthorityCertificateRequest getCACertificateRequest = GetCertificateAuthorityCertificateRequest.builder()
+                    .certificateAuthorityArn(ca.arn())
+                    .build();
 
-        return client.getCertificateAuthorityCertificate(getCACertificateRequest).getCertificate();
+            return client.getCertificateAuthorityCertificate(getCACertificateRequest).get().certificate();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private List<CertificateAuthority> listCAs() {
-        String nextToken = null;
-        List<CertificateAuthority> discoveredCAs = new ArrayList<>();
-        do {
-            ListCertificateAuthoritiesResult results = client.listCertificateAuthorities(new ListCertificateAuthoritiesRequest()
-                    .withNextToken(nextToken));
+        try {
+            String nextToken = null;
+            List<CertificateAuthority> discoveredCAs = new ArrayList<>();
+            do {
+                ListCertificateAuthoritiesResponse results = client.listCertificateAuthorities(ListCertificateAuthoritiesRequest.builder()
+                        .nextToken(nextToken).build()).get();
 
-            discoveredCAs.addAll(results.getCertificateAuthorities());
-            nextToken = results.getNextToken();
-        } while (Objects.nonNull(nextToken));
+                discoveredCAs.addAll(results.certificateAuthorities());
+                nextToken = results.nextToken();
+            } while (Objects.nonNull(nextToken));
 
-        return discoveredCAs;
+            System.out.println("Discovered "+ discoveredCAs.size() + " CA's");
+            return discoveredCAs;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private String getCACSR() {
-        System.out.println("Retrieving CA CSR for arn=" + ca.getArn());
+        System.out.println("Retrieving CA CSR for arn=" + ca.arn());
 
-        GetCertificateAuthorityCsrRequest getCACSRRequest = new GetCertificateAuthorityCsrRequest()
-                .withCertificateAuthorityArn(ca.getArn());
+        try {
+            GetCertificateAuthorityCsrRequest getCACSRRequest = GetCertificateAuthorityCsrRequest.builder()
+                    .certificateAuthorityArn(ca.arn())
+                    .build();
 
-        Waiter<GetCertificateAuthorityCsrRequest> waiter = client.waiters().certificateAuthorityCSRCreated();
-        WaiterParameters<GetCertificateAuthorityCsrRequest> waiterParameters = new WaiterParameters<>(getCACSRRequest);
-        waiter.run(waiterParameters);
+            AcmPcaAsyncWaiter asyncWaiter = client.waiter();
+            CompletableFuture<WaiterResponse<GetCertificateAuthorityCsrResponse>> waiterResponse = asyncWaiter
+                    .waitUntilCertificateAuthorityCSRCreated(getCACSRRequest);
 
-        GetCertificateAuthorityCsrResult getCACSRResult = client.getCertificateAuthorityCsr(getCACSRRequest);
-        String caCSR =  getCACSRResult.getCsr();
+            String caCSR = waiterResponse.join().matched().response().get().csr();
 
-        System.out.println("CA CSR for arn=" + ca.getArn() + ":\n" + caCSR);
+            System.out.println("CA CSR for arn=" + ca.arn() + ":\n" + caCSR);
 
-        return caCSR;
+            return caCSR;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
-    private GetCertificateResult getCertificate(final CertificateAuthority ca, final String certificateArn) {
+    private GetCertificateResponse getCertificate(final CertificateAuthority ca, final String certificateArn) {
         System.out.println("Retrieving certificate for arn=" + certificateArn);
 
-        GetCertificateRequest getCertificateRequest = new GetCertificateRequest()
-                .withCertificateAuthorityArn(ca.getArn())
-                .withCertificateArn(certificateArn);
+        try {
+            GetCertificateRequest getCertificateRequest = GetCertificateRequest.builder()
+                    .certificateAuthorityArn(ca.arn())
+                    .certificateArn(certificateArn)
+                    .build();
 
-        Waiter<GetCertificateRequest> waiter = client.waiters().certificateIssued();
-        WaiterParameters<GetCertificateRequest> waiterParameters = new WaiterParameters<>(getCertificateRequest);
-        waiter.run(waiterParameters);
+            AcmPcaAsyncWaiter asyncWaiter = client.waiter();
 
-        GetCertificateResult result = client.getCertificate(getCertificateRequest);
+            CompletableFuture<WaiterResponse<GetCertificateResponse>> waiterResponse = asyncWaiter.waitUntilCertificateIssued(getCertificateRequest);
+            GetCertificateResponse response = waiterResponse.join().matched().response().get();
 
-        System.out.println("Certificate for arn=" + certificateArn + ":\n" + result.getCertificateChain() + "\n" + result.getCertificate());
+            System.out.println("GetCertificateResponse: "
+                    + "Status Code:" + response.sdkHttpResponse().statusCode()
+                    + ", Status Text:" + response.sdkHttpResponse().statusText().orElseGet(() -> "None")
+                    + ", Headers: " + response.sdkHttpResponse().headers());
+            System.out.println("Certificate for arn=" + certificateArn + ":\nChain= " + response.certificateChain() + "\nCert= " + response.certificate());
 
-        return result;
+            return response;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private String activateRootCA() {
         String caCSR = getCACSR();
+        System.out.println("Issuing CA certificate for for arn=" + ca.arn());
 
-        System.out.println("Issuing CA certificate for for arn=" + ca.getArn());
+        try {
+            Validity validity = Validity.builder()
+                    .type(ValidityPeriodType.YEARS)
+                    .value(10L)
+                    .build();
 
-        Validity validity = new Validity()
-                .withType(ValidityPeriodType.YEARS)
-                .withValue(10L);
+            IssueCertificateRequest issueCertificateRequest = IssueCertificateRequest.builder()
+                    .idempotencyToken(UUID.randomUUID().toString())
+                    .certificateAuthorityArn(ca.arn())
+                    .csr(SdkBytes.fromByteArray(caCSR.getBytes()))
+                    .signingAlgorithm(signingAlgorithm)
+                    .templateArn("arn:aws:acm-pca:::template/RootCACertificate/V1")
+                    .validity(validity)
+                    .build();
 
-        IssueCertificateRequest issueCertificateRequest = new IssueCertificateRequest()
-                .withIdempotencyToken(UUID.randomUUID().toString())
-                .withCertificateAuthorityArn(ca.getArn())
-                .withCsr(ByteBuffer.wrap(caCSR.getBytes()))
-                .withSigningAlgorithm(SigningAlgorithm.SHA256WITHRSA)
-                .withTemplateArn("arn:aws:acm-pca:::template/RootCACertificate/V1")
-                .withValidity(validity);
+            String caCertificateArn = client.issueCertificate(issueCertificateRequest).get().certificateArn();
 
-        String caCertificateArn = client.issueCertificate(issueCertificateRequest).getCertificateArn();
+            GetCertificateResponse getCertificateResult = getCertificate(ca, caCertificateArn);
 
-        GetCertificateResult getCertificateResult = getCertificate(ca, caCertificateArn);
+            System.out.println("Importing CA certificate for for arn=" + ca.arn());
 
-        System.out.println("Importing CA certificate for for arn=" + ca.getArn());
+            ImportCertificateAuthorityCertificateRequest importCACertRequest = ImportCertificateAuthorityCertificateRequest.builder()
+                    .certificateAuthorityArn(ca.arn())
+                    .certificate(SdkBytes.fromByteArray(getCertificateResult.certificate().getBytes()))
+                    .build();
 
-        ImportCertificateAuthorityCertificateRequest importCACertRequest = new ImportCertificateAuthorityCertificateRequest()
-                .withCertificateAuthorityArn(ca.getArn())
-                .withCertificate(ByteBuffer.wrap(getCertificateResult.getCertificate().getBytes()));
+            client.importCertificateAuthorityCertificate(importCACertRequest).get();
 
-        client.importCertificateAuthorityCertificate(importCACertRequest);
-
-        return getCertificateResult.getCertificate();
+            return getCertificateResult.certificate();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private String activateSubordinateCA(final CertificateAuthority issuingCA) {
         String caCSR = getCACSR();
 
-        System.out.println("Issuing CA certificate for for arn=" + ca.getArn());
+        System.out.println("Issuing CA certificate for for arn=" + ca.arn());
 
-        Validity validity = new Validity()
-                .withType(ValidityPeriodType.YEARS)
-                .withValue(5L);
+        try {
+            Validity validity = Validity.builder()
+                    .type(ValidityPeriodType.YEARS)
+                    .value(5L)
+                    .build();
 
-        IssueCertificateRequest issueCertificateRequest = new IssueCertificateRequest()
-                .withIdempotencyToken(UUID.randomUUID().toString())
-                .withCertificateAuthorityArn(issuingCA.getArn())
-                .withCsr(ByteBuffer.wrap(caCSR.getBytes()))
-                .withSigningAlgorithm(SigningAlgorithm.SHA256WITHRSA)
-                .withTemplateArn("arn:aws:acm-pca:::template/SubordinateCACertificate_PathLen0/V1")
-                .withValidity(validity);
+            IssueCertificateRequest issueCertificateRequest = IssueCertificateRequest.builder()
+                    .idempotencyToken(UUID.randomUUID().toString())
+                    .certificateAuthorityArn(issuingCA.arn())
+                    .csr(SdkBytes.fromByteArray(caCSR.getBytes()))
+                    .signingAlgorithm(signingAlgorithm)
+                    .templateArn("arn:aws:acm-pca:::template/SubordinateCACertificate_PathLen0/V1")
+                    .validity(validity)
+                    .build();
 
-        String caCertificateArn = client.issueCertificate(issueCertificateRequest).getCertificateArn();
+            String caCertificateArn = client.issueCertificate(issueCertificateRequest).get().certificateArn();
 
-        GetCertificateResult getCertificateResult = getCertificate(issuingCA, caCertificateArn);
+            GetCertificateResponse getCertificateResult = getCertificate(issuingCA, caCertificateArn);
 
-        System.out.println("Importing CA certificate for for arn=" + ca.getArn());
+            System.out.println("Importing CA certificate for for arn=" + ca.arn());
 
-        ImportCertificateAuthorityCertificateRequest importCACertRequest = new ImportCertificateAuthorityCertificateRequest()
-                .withCertificateAuthorityArn(ca.getArn())
-                .withCertificateChain(ByteBuffer.wrap(getCertificateResult.getCertificateChain().getBytes()))
-                .withCertificate(ByteBuffer.wrap(getCertificateResult.getCertificate().getBytes()));
+            ImportCertificateAuthorityCertificateRequest importCACertRequest = ImportCertificateAuthorityCertificateRequest.builder()
+                    .certificateAuthorityArn(ca.arn())
+                    .certificateChain(SdkBytes.fromByteArray(getCertificateResult.certificateChain().getBytes()))
+                    .certificate(SdkBytes.fromByteArray(getCertificateResult.certificate().getBytes()))
+                    .build();
 
-        client.importCertificateAuthorityCertificate(importCACertRequest);
+            client.importCertificateAuthorityCertificate(importCACertRequest);
 
-        return getCertificateResult.getCertificate();
+            return getCertificateResult.certificate();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
-    public GetCertificateResult issueCodeSigningCertificate(final String csr) {
-        System.out.println("Issuing code signing certificate for for arn=" + ca.getArn());
+    public GetCertificateResponse issueCodeSigningCertificate(final String csr) {
+        System.out.println("Issuing code signing certificate for for arn=" + ca.arn());
 
-        Validity validity = new Validity()
-                .withType(ValidityPeriodType.YEARS)
-                .withValue(1L);
+        try {
+            Validity validity = Validity.builder()
+                    .type(ValidityPeriodType.YEARS)
+                    .value(1L)
+                    .build();
 
-        IssueCertificateRequest issueCertificateRequest = new IssueCertificateRequest()
-                .withIdempotencyToken(UUID.randomUUID().toString())
-                .withCertificateAuthorityArn(ca.getArn())
-                .withCsr(ByteBuffer.wrap(csr.getBytes()))
-                .withSigningAlgorithm(SigningAlgorithm.SHA256WITHRSA)
-                .withTemplateArn("arn:aws:acm-pca:::template/CodeSigningCertificate/V1")
-                .withValidity(validity);
+            IssueCertificateRequest issueCertificateRequest = IssueCertificateRequest.builder()
+                    .idempotencyToken(UUID.randomUUID().toString())
+                    .certificateAuthorityArn(ca.arn())
+                    .csr(SdkBytes.fromByteArray(csr.getBytes()))
+                    .signingAlgorithm(signingAlgorithm)
+                    .templateArn("arn:aws:acm-pca:::template/CodeSigningCertificate/V1")
+                    .validity(validity)
+                    .build();
 
-       String certificateArn = client.issueCertificate(issueCertificateRequest).getCertificateArn();
+            String certificateArn = client.issueCertificate(issueCertificateRequest).get().certificateArn();
 
-        GetCertificateRequest getCertificateRequest = new GetCertificateRequest()
-                .withCertificateAuthorityArn(ca.getArn())
-                .withCertificateArn(certificateArn);
+            GetCertificateRequest getCertificateRequest = GetCertificateRequest.builder()
+                    .certificateAuthorityArn(ca.arn())
+                    .certificateArn(certificateArn)
+                    .build();
 
-        Waiter<GetCertificateRequest> waiter = client.waiters().certificateIssued();
-        WaiterParameters<GetCertificateRequest> waiterParameters = new WaiterParameters<>(getCertificateRequest);
-        waiter.run(waiterParameters);
+            AcmPcaAsyncWaiter asyncWaiter = client.waiter();
+            CompletableFuture<WaiterResponse<GetCertificateResponse>> waiterResponse = asyncWaiter.waitUntilCertificateIssued(getCertificateRequest);
+            GetCertificateResponse response = waiterResponse.join().matched().response().get();
 
-        GetCertificateResult result = client.getCertificate(getCertificateRequest);
+            System.out.println("Generated code signing certificate:\n" + response.certificate());
 
-        System.out.println("Generated code signing certificate:\n" + result.getCertificate());
-
-        return result;
+            return response;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
@@ -262,6 +332,8 @@ public class PrivateCA {
         return "PrivateCA{" +
                 "commonName='" + commonName + '\'' +
                 ", type=" + type +
+                ", keyAlg=" + keyAlgorithm +
+                ", signingAlg=" + signingAlgorithm +
                 '}';
     }
 
@@ -273,6 +345,8 @@ public class PrivateCA {
         private PrivateCA issuer;
         private String commonName;
         private CertificateAuthorityType type;
+        private KeyAlgorithm keyAlgorithm;
+        private SigningAlgorithm signingAlgorithm;
 
         private Builder() {}
 
@@ -291,8 +365,18 @@ public class PrivateCA {
             return this;
         }
 
+        public Builder withKeyAlgorithm(final KeyAlgorithm keyAlgorithm) {
+            this.keyAlgorithm = keyAlgorithm;
+            return this;
+        }
+
+        public Builder withSigningAlgorithm(final SigningAlgorithm signingAlgorithm) {
+            this.signingAlgorithm = signingAlgorithm;
+            return this;
+        }
+
         public PrivateCA getOrCreate() {
-            return new PrivateCA(Optional.ofNullable(issuer), commonName, type);
+            return new PrivateCA(Optional.ofNullable(issuer), commonName, type, keyAlgorithm, signingAlgorithm);
         }
     }
 }

@@ -1,9 +1,6 @@
 package com.amazonaws.acmpcakms.examples;
 
-import com.amazonaws.regions.Regions;
-import com.amazonaws.services.kms.AWSKMS;
-import com.amazonaws.services.kms.AWSKMSClientBuilder;
-import com.amazonaws.services.kms.model.*;
+import software.amazon.awssdk.services.kms.model.*;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.BasicConstraints;
@@ -16,6 +13,10 @@ import org.bouncycastle.pkcs.PKCS10CertificationRequestBuilder;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 import org.bouncycastle.util.io.pem.PemObjectGenerator;
 import org.bouncycastle.util.io.pem.PemWriter;
+import software.amazon.awssdk.crt.io.TlsCipherPreference;
+import software.amazon.awssdk.http.async.SdkAsyncHttpClient;
+import software.amazon.awssdk.http.crt.AwsCrtAsyncHttpClient;
+import software.amazon.awssdk.services.kms.KmsAsyncClient;
 
 import java.io.StringWriter;
 import java.security.KeyFactory;
@@ -27,33 +28,46 @@ import java.util.Objects;
 
 public class AsymmetricCMK {
 
-    private final AWSKMS client;
+    private final KmsAsyncClient client;
     private final String alias;
     private final String keyId;
+    private final CustomerMasterKeySpec keySpec;
 
-    private AsymmetricCMK(final String alias) {
+    private AsymmetricCMK(final String alias, CustomerMasterKeySpec keySpec) {
         if (Objects.isNull(alias) || alias.isBlank()) {
             throw new IllegalArgumentException("A non-empty alias must be specified");
         }
 
-        this.client = AWSKMSClientBuilder.standard()
-                .withRegion(Regions.US_EAST_1)
+        if (Objects.isNull(keySpec)) {
+            throw new IllegalArgumentException("CustomerMasterKeySpec may not be null");
+        }
+
+        // Set up a PQ TLS HTTP client that will be used when connecting to AWS
+        SdkAsyncHttpClient awsCrtHttpClient = AwsCrtAsyncHttpClient.builder()
+                .postQuantumTlsEnabled(true)
                 .build();
-        this.alias = alias;
+
+        // Set up a KMS Client which will offer hybrid post-quantum TLS with KMS.
+        this.client = KmsAsyncClient.builder()
+                .httpClient(awsCrtHttpClient)
+                .build();
+
+        this.keySpec = keySpec;
+        this.alias = alias + "-" + keySpec.name();
 
         List<AliasListEntry> discoveredAliases = listAliases();
 
         this.keyId = discoveredAliases.stream()
                 .filter(this::matches)
-                .map(AliasListEntry::getTargetKeyId)
+                .map(AliasListEntry::targetKeyId)
                 .findFirst()
                 .orElseGet(this::createKey);
 
         System.out.println();
-        System.out.println("Alias " + alias + " maps to key id " + keyId);
+        System.out.println("Alias " + this.alias + " maps to key id " + keyId);
     }
 
-    public AWSKMS getClient() {
+    public KmsAsyncClient getClient() {
         return client;
     }
 
@@ -62,62 +76,82 @@ public class AsymmetricCMK {
     }
 
     private boolean matches(final AliasListEntry alias) {
-        return ("alias/" + this.alias).equals(alias.getAliasName());
+        return ("alias/" + this.alias).equals(alias.aliasName());
     }
 
     private List<AliasListEntry> listAliases() {
         String marker = null;
         boolean truncated = false;
         List<AliasListEntry> discoveredAliases = new ArrayList<>();
-        do {
-            ListAliasesResult results = client.listAliases(new ListAliasesRequest()
-                    .withMarker(marker));
+        try {
+            do {
+                ListAliasesResponse results = client.listAliases(ListAliasesRequest.builder().marker(marker).build()).get();
 
-            discoveredAliases.addAll(results.getAliases());
-            marker = results.getNextMarker();
-            truncated = results.getTruncated();
-        } while (truncated);
+                discoveredAliases.addAll(results.aliases());
+                marker = results.nextMarker();
+                truncated = results.truncated();
+            } while (truncated);
 
-        return discoveredAliases;
+            return discoveredAliases;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private String createKey() {
         System.out.println("No matching CMK found, creating a new one (" + this + ")");
 
-        CreateKeyRequest createKeyRequest = new CreateKeyRequest()
-                .withCustomerMasterKeySpec(CustomerMasterKeySpec.RSA_2048)
-                .withKeyUsage(KeyUsageType.SIGN_VERIFY);
+        try{
+            CreateKeyRequest createKeyRequest = CreateKeyRequest.builder()
+                    .customerMasterKeySpec(keySpec)
+                    .keyUsage(KeyUsageType.SIGN_VERIFY)
+                    .build();
 
-        String keyId = client.createKey(createKeyRequest)
-                .getKeyMetadata()
-                .getKeyId();
+            String keyId = client.createKey(createKeyRequest).get()
+                    .keyMetadata()
+                    .keyId();
 
-        System.out.println("Created CMK. Creating alias for key=" + keyId);
+            System.out.println("Created CMK. Creating alias for key=" + keyId);
 
-        CreateAliasRequest createAliasRequest = new CreateAliasRequest()
-                .withAliasName("alias/" + alias)
-                .withTargetKeyId(keyId);
+            CreateAliasRequest createAliasRequest = CreateAliasRequest.builder()
+                    .aliasName("alias/" + alias)
+                    .targetKeyId(keyId)
+                    .build();
 
-        client.createAlias(createAliasRequest);
+            client.createAlias(createAliasRequest).get();
 
-        System.out.println("Created alias=" + alias + " to key=" + keyId);
+            System.out.println("Created alias=" + alias + " to key=" + keyId);
 
-        return keyId;
+            return keyId;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static String getBCKeyFactoryName(CustomerMasterKeySpec keySpec) {
+        switch (keySpec) {
+            case RSA_2048:
+                return "RSA";
+            default:
+                throw new RuntimeException("Unknown KeySpec: " + keySpec.name());
+        }
     }
 
     private PublicKey getPublicKey() {
         try {
             System.out.println("Getting public key for key=" + keyId);
 
-            GetPublicKeyRequest getPublicKeyRequest = new GetPublicKeyRequest()
-                    .withKeyId(keyId);
+            GetPublicKeyRequest getPublicKeyRequest = GetPublicKeyRequest.builder()
+                    .keyId(keyId)
+                    .build();
 
-            byte[] publicKeyBytes = client.getPublicKey(getPublicKeyRequest)
-                    .getPublicKey()
-                    .array();
+            byte[] publicKeyBytes = client.getPublicKey(getPublicKeyRequest).get()
+                    .publicKey()
+                    .asByteArray();
 
             X509EncodedKeySpec publicKeySpec = new X509EncodedKeySpec(publicKeyBytes);
-            PublicKey publicKey = KeyFactory.getInstance("RSA", BouncyCastleProvider.PROVIDER_NAME)
+
+            PublicKey publicKey = KeyFactory.getInstance(getBCKeyFactoryName(keySpec), BouncyCastleProvider.PROVIDER_NAME)
                     .generatePublic(publicKeySpec);
 
             System.out.println("Public key for key=" + keyId + ":\n" + publicKey);
@@ -172,6 +206,7 @@ public class AsymmetricCMK {
     public static class Builder {
 
         private String alias;
+        private CustomerMasterKeySpec keySpec;
 
         private Builder() {}
 
@@ -180,8 +215,13 @@ public class AsymmetricCMK {
             return this;
         }
 
+        public Builder withKeySpec(CustomerMasterKeySpec keySpec) {
+            this.keySpec = keySpec;
+            return this;
+        }
+
         public AsymmetricCMK getOrCreate() {
-            return new AsymmetricCMK(alias);
+            return new AsymmetricCMK(alias, keySpec);
         }
     }
 }

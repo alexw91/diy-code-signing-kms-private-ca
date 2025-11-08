@@ -1,8 +1,6 @@
 package com.amazonaws.acmpcakms.examples;
 
-import com.amazonaws.services.kms.AWSKMS;
-import com.amazonaws.services.kms.model.SignRequest;
-import com.amazonaws.services.kms.model.SigningAlgorithmSpec;
+
 import org.bouncycastle.asn1.DERBitString;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.operator.ContentSigner;
@@ -10,6 +8,9 @@ import org.bouncycastle.operator.DefaultSignatureAlgorithmIdentifierFinder;
 import org.bouncycastle.operator.SignatureAlgorithmIdentifierFinder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.PKCS10CertificationRequestBuilder;
+import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.services.kms.model.*;
+import software.amazon.awssdk.services.kms.KmsAsyncClient;
 
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
@@ -91,26 +92,31 @@ public class Signing {
 
                 @Override
                 public byte[] getSignature() {
-                    AWSKMS client = cmk.getClient();
+                    KmsAsyncClient client = cmk.getClient();
                     String keyId = cmk.getKeyId();
                     byte[] input = outputStream.toByteArray();
 
                     System.out.println("Generating signature with key=" + cmk.getKeyId() + " for input " + Base64.getEncoder().encodeToString(input));
 
-                    ByteBuffer message = ByteBuffer.wrap(input);
+                    SdkBytes message = SdkBytes.fromByteArray(input);
 
-                    SignRequest signRequest = new SignRequest()
-                            .withKeyId(keyId)
-                            .withSigningAlgorithm(signatureAlgorithm)
-                            .withMessage(message);
+                    try {
+                        SignRequest signRequest = SignRequest.builder()
+                                .keyId(keyId)
+                                .signingAlgorithm(signatureAlgorithm)
+                                .message(message)
+                                .build();
 
-                    byte[] signature = client.sign(signRequest)
-                            .getSignature()
-                            .array();
+                        byte[] signature = client.sign(signRequest).get()
+                                .signature()
+                                .asByteArray();
 
-                    System.out.println("Signature with key=" + keyId + ": " + Base64.getEncoder().encodeToString(signature));
+                        System.out.println("Signature with key=" + keyId + ": " + Base64.getEncoder().encodeToString(signature));
 
-                    return signature;
+                        return signature;
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
                 }
             };
         }
