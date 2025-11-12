@@ -236,7 +236,7 @@ public class CustomCodeSigningObject {
                 throw new IllegalArgumentException("Unexpected object length (" + sequence.size() + ")");
             }
 
-            DERBitString dataBlob = DERBitString.getInstance(sequence.getObjectAt(0));
+            DERBitString dataBlob = (DERBitString) DERBitString.getInstance(sequence.getObjectAt(0));
             X500Name issuerCertificateSubject = X500Name.getInstance(sequence.getObjectAt(1));
 
             return new TBSCustomCodeSigningObject(dataBlob, issuerCertificateSubject);

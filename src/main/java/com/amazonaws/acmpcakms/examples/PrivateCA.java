@@ -12,7 +12,6 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 
 public class PrivateCA {
-
     private final AcmPcaAsyncClient client;
     private final String commonName;
     private final CertificateAuthorityType type;
@@ -153,7 +152,7 @@ public class PrivateCA {
                 ListCertificateAuthoritiesResponse results = client.listCertificateAuthorities(ListCertificateAuthoritiesRequest.builder()
                         .nextToken(nextToken).build()).get();
 
-                discoveredCAs.addAll(results.certificateAuthorities());
+                discoveredCAs.addAll(results.certificateAuthorities().stream().filter(ca -> ca.status().equals(CertificateAuthorityStatus.ACTIVE)).toList());
                 nextToken = results.nextToken();
             } while (Objects.nonNull(nextToken));
 
@@ -199,12 +198,6 @@ public class PrivateCA {
 
             CompletableFuture<WaiterResponse<GetCertificateResponse>> waiterResponse = asyncWaiter.waitUntilCertificateIssued(getCertificateRequest);
             GetCertificateResponse response = waiterResponse.join().matched().response().get();
-
-            System.out.println("GetCertificateResponse: "
-                    + "Status Code:" + response.sdkHttpResponse().statusCode()
-                    + ", Status Text:" + response.sdkHttpResponse().statusText().orElseGet(() -> "None")
-                    + ", Headers: " + response.sdkHttpResponse().headers());
-            System.out.println("Certificate for arn=" + certificateArn + ":\nChain= " + response.certificateChain() + "\nCert= " + response.certificate());
 
             return response;
         } catch (Exception e) {
@@ -271,6 +264,7 @@ public class PrivateCA {
                     .build();
 
             String caCertificateArn = client.issueCertificate(issueCertificateRequest).get().certificateArn();
+            System.out.println("Generated subordinate CA certificate: " + caCertificateArn);
 
             GetCertificateResponse getCertificateResult = getCertificate(issuingCA, caCertificateArn);
 
@@ -309,17 +303,19 @@ public class PrivateCA {
                     .build();
 
             String certificateArn = client.issueCertificate(issueCertificateRequest).get().certificateArn();
+            System.out.println("Generated code signing certificate: " + certificateArn);
 
             GetCertificateRequest getCertificateRequest = GetCertificateRequest.builder()
                     .certificateAuthorityArn(ca.arn())
                     .certificateArn(certificateArn)
                     .build();
 
+
             AcmPcaAsyncWaiter asyncWaiter = client.waiter();
             CompletableFuture<WaiterResponse<GetCertificateResponse>> waiterResponse = asyncWaiter.waitUntilCertificateIssued(getCertificateRequest);
             GetCertificateResponse response = waiterResponse.join().matched().response().get();
 
-            System.out.println("Generated code signing certificate:\n" + response.certificate());
+
 
             return response;
         } catch (Exception e) {

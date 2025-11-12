@@ -1,5 +1,6 @@
 package com.amazonaws.acmpcakms.examples;
 
+import software.amazon.awssdk.services.acmpca.model.KeyAlgorithm;
 import software.amazon.awssdk.services.kms.model.*;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -31,15 +32,16 @@ public class AsymmetricCMK {
     private final KmsAsyncClient client;
     private final String alias;
     private final String keyId;
-    private final CustomerMasterKeySpec keySpec;
+    private final KeySpec keySpec;
 
-    private AsymmetricCMK(final String alias, CustomerMasterKeySpec keySpec) {
+
+    private AsymmetricCMK(final String alias, KeySpec keySpec) {
         if (Objects.isNull(alias) || alias.isBlank()) {
             throw new IllegalArgumentException("A non-empty alias must be specified");
         }
 
         if (Objects.isNull(keySpec)) {
-            throw new IllegalArgumentException("CustomerMasterKeySpec may not be null");
+            throw new IllegalArgumentException("KeySpec may not be null");
         }
 
         // Set up a PQ TLS HTTP client that will be used when connecting to AWS
@@ -53,7 +55,7 @@ public class AsymmetricCMK {
                 .build();
 
         this.keySpec = keySpec;
-        this.alias = alias + "-" + keySpec.name();
+        this.alias = alias;
 
         List<AliasListEntry> discoveredAliases = listAliases();
 
@@ -73,6 +75,17 @@ public class AsymmetricCMK {
 
     public String getKeyId() {
         return keyId;
+    }
+
+    public SigningAlgorithmSpec getSigningAlg() {
+        switch (keySpec) {
+            case RSA_2048:
+                return SigningAlgorithmSpec.RSASSA_PKCS1_V1_5_SHA_256;
+            case ML_DSA_65:
+                return SigningAlgorithmSpec.ML_DSA_SHAKE_256;
+            default:
+                throw new IllegalArgumentException("Unknown SigningAlgorithmSpec for KeySpec: " + keySpec.name());
+        }
     }
 
     private boolean matches(final AliasListEntry alias) {
@@ -103,7 +116,7 @@ public class AsymmetricCMK {
 
         try{
             CreateKeyRequest createKeyRequest = CreateKeyRequest.builder()
-                    .customerMasterKeySpec(keySpec)
+                    .keySpec(keySpec)
                     .keyUsage(KeyUsageType.SIGN_VERIFY)
                     .build();
 
@@ -128,10 +141,12 @@ public class AsymmetricCMK {
         }
     }
 
-    private static String getBCKeyFactoryName(CustomerMasterKeySpec keySpec) {
+    private static String getBCKeyFactoryName(KeySpec keySpec) {
         switch (keySpec) {
             case RSA_2048:
                 return "RSA";
+            case ML_DSA_65:
+                return "ML-DSA";
             default:
                 throw new RuntimeException("Unknown KeySpec: " + keySpec.name());
         }
@@ -206,7 +221,7 @@ public class AsymmetricCMK {
     public static class Builder {
 
         private String alias;
-        private CustomerMasterKeySpec keySpec;
+        private KeySpec keySpec;
 
         private Builder() {}
 
@@ -215,7 +230,7 @@ public class AsymmetricCMK {
             return this;
         }
 
-        public Builder withKeySpec(CustomerMasterKeySpec keySpec) {
+        public Builder withKeySpec(KeySpec keySpec) {
             this.keySpec = keySpec;
             return this;
         }

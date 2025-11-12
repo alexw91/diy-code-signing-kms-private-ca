@@ -20,11 +20,8 @@ import java.util.Objects;
 
 public class Signing {
 
-    public static final String SIGNATURE_ALGORITHM = SigningAlgorithmSpec.RSASSA_PKCS1_V1_5_SHA_256.name();
-
     public static Signature generateSignature(final AsymmetricCMK cmk, final byte[] encoded) throws Exception {
-        ContentSigner contentSigner = new KMSCMKContentSignerBuilder(cmk)
-                .build(SIGNATURE_ALGORITHM);
+        ContentSigner contentSigner = new KMSCMKContentSignerBuilder(cmk).build();
 
         OutputStream outputStream = contentSigner.getOutputStream();
         outputStream.write(encoded);
@@ -32,18 +29,17 @@ public class Signing {
 
         byte[] signature = contentSigner.getSignature();
 
-        return new Signature(SIGNATURE_ALGORITHM, signature);
+        return new Signature(cmk.getSigningAlg(), signature);
     }
 
     public static PKCS10CertificationRequest sign(final AsymmetricCMK cmk, final PKCS10CertificationRequestBuilder csrBuilder) {
-        ContentSigner contentSigner = new KMSCMKContentSignerBuilder(cmk)
-                .build(SIGNATURE_ALGORITHM);
+        ContentSigner contentSigner = new KMSCMKContentSignerBuilder(cmk).build();
 
         return csrBuilder.build(contentSigner);
     }
-    private static AlgorithmIdentifier findAlgorithmIdentifier(final String signatureAlgorithm) {
+    private static AlgorithmIdentifier findAlgorithmIdentifier(final SigningAlgorithmSpec signatureAlgorithm) {
         SignatureAlgorithmIdentifierFinder algorithmIdentifier = new DefaultSignatureAlgorithmIdentifierFinder();
-        switch (signatureAlgorithm) {
+        switch (signatureAlgorithm.name()) {
             case "RSASSA_PSS_SHA_256":
                 return algorithmIdentifier.find("SHA256WITHRSAANDMGF1");
             case "RSASSA_PSS_SHA_384":
@@ -68,16 +64,15 @@ public class Signing {
     }
 
     private static class KMSCMKContentSignerBuilder {
-
         private final AsymmetricCMK cmk;
 
         public KMSCMKContentSignerBuilder(final AsymmetricCMK cmk) {
             this.cmk = cmk;
         }
 
-        public ContentSigner build(final String signatureAlgorithm) {
+        public ContentSigner build() {
             ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-            AlgorithmIdentifier algorithmIdentifier = findAlgorithmIdentifier(signatureAlgorithm);
+            AlgorithmIdentifier algorithmIdentifier = findAlgorithmIdentifier(cmk.getSigningAlg());
 
             return new ContentSigner() {
                 @Override
@@ -103,7 +98,7 @@ public class Signing {
                     try {
                         SignRequest signRequest = SignRequest.builder()
                                 .keyId(keyId)
-                                .signingAlgorithm(signatureAlgorithm)
+                                .signingAlgorithm(cmk.getSigningAlg())
                                 .message(message)
                                 .build();
 
@@ -126,7 +121,7 @@ public class Signing {
         private final AlgorithmIdentifier algorithmIdentifier;
         private final DERBitString signature;
 
-        public Signature(final String signatureAlgorithm, final byte[] signature) {
+        public Signature(final SigningAlgorithmSpec signatureAlgorithm, final byte[] signature) {
             this.algorithmIdentifier = findAlgorithmIdentifier(signatureAlgorithm);
             this.signature = new DERBitString(signature);
         }
